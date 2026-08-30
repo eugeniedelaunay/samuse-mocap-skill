@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+training_results/
+training_results_grouped/
+features_analysis_raw/
+features_analysis_z/
