@@ -1,5 +1,13 @@
-numpy
-pandas
-scipy
-scikit-learn
-openpyxl
+# SAMuSe pipeline — pinned for reproducibility.
+# Verified working on Python 3.10 and 3.11 (Windows, Linux, macOS).
+# Regenerate with `pip freeze > requirements-lock.txt` after any deliberate upgrade.
+
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.13.1
+scikit-learn==1.4.2
+openpyxl==3.1.2
+PyYAML==6.0.1
+
+# --- RNN stage only (skip if using --skip-rnn and don't need PyTorch) ---
+torch==2.3.1

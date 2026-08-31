@@ -1,7 +1,45 @@
+# =============================================================================
+# SAMuSe .gitignore
+# Raw MoCap recordings and large regenerable intermediates are excluded.
+# De-identified derived features and metadata ARE committed (see README).
+# =============================================================================
+
+# Raw motion-capture recordings -- participant privacy, never commit
+data/raw/
+data/raw_mocap/
+
+# Preprocessed (cleaned) trial CSVs -- large, fully regenerable from raw + preprocess.py
+data/preprocessed/
+
+# QC / diagnostic reports -- regenerable from trial_features.csv, can be large
+data/features_analysis*/
+
+# Training outputs -- regenerable from committed feature CSVs, large (fold predictions, models)
+results/
+training_results*/
+
+# Do NOT ignore these -- they are de-identified and small, and are the pipeline's
+# committed inputs/checkpoints for reproducibility:
+#   data/metadata/participants_instrument_skill_toshare.xlsx
+#   data/pca/unified_pca_participant_features.csv
+#   data/features_extracted/trial_features.csv
+
+# Python
 __pycache__/
 *.pyc
-.ipynb_checkpoints/
-training_results/
-training_results_grouped/
-features_analysis_raw/
-features_analysis_z/
+.venv/
+venv/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Optuna study database (regenerate per run unless explicitly shared)
+*.db
+optuna_studies/
+
+# Logs
+*.log

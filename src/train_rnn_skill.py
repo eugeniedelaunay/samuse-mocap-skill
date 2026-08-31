@@ -16,19 +16,6 @@ Within each fold, a portion of the training trials is held out as a
 validation set for early stopping; the fold's test set is only used
 for final evaluation.
 
-Leakage fix
------------
-When --protocol participant is used, the inner train/validation split
-(used only for early stopping) is also grouped by participant via
-GroupShuffleSplit, so no participant's trials are split across the
-inner train and validation subsets. This mirrors the outer
-StratifiedGroupKFold split and prevents early stopping from being
-guided by a leaky validation signal that rewards memorizing
-participant identity rather than genuine skill-related patterns.
-For --protocol trial, the inner split remains a plain stratified
-train_test_split on trial indices, consistent with that protocol's
-intentionally looser evaluation.
-
 Example:
 python train_rnn_skill.py \
   --input_dir preprocessed/ \
@@ -48,6 +35,8 @@ import json
 import os
 import re
 from pathlib import Path
+import random
+
 
 import numpy as np
 import pandas as pd
@@ -66,6 +55,9 @@ from torch.utils.data import DataLoader, Dataset
 
 RANDOM_STATE = 42
 FRAME_RATE = 50.0
+random.seed(RANDOM_STATE)
+np.random.seed(RANDOM_STATE)
+torch.manual_seed(RANDOM_STATE)
 
 # Joint position columns used as RNN input channels.
 POSITION_COLUMNS = [
@@ -410,10 +402,13 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--n_splits", type=int, default=5)
+    parser.add_argument("--device", default="auto", help="auto | cpu | cuda | cuda:0 ...")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
+    )
     print(f"Using device: {device}")
 
     metadata_map = load_metadata(args.metadata_file)
