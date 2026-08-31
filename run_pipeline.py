@@ -10,16 +10,11 @@ Stages (in order):
   1. preprocess          raw MoCap CSVs           -> cleaned trial CSVs
   2. unified_pca         cleaned trial CSVs        -> unified PCA participant features
   3. extract_features    cleaned + PCA features    -> trial_features.csv
-  4. analyze_features    trial_features_with_skill.csv -> QC/diagnostic reports
-  5. train_classical     trial_features_with_skill.csv -> trial-wise classical results
-  6. train_grouped       trial_features_with_skill.csv -> participant-wise classical results
-  7. train_rnn           cleaned trial CSVs         -> RNN results (both protocols)
-
-NOTE: trial_features.csv (output of extract_features) does NOT contain skill
-labels. trial_features_with_skill.csv is trial_features.csv merged with the
-participant metadata file's skill-level column. This merge currently happens
-outside this orchestrator -- see README "Known issues" for the manual step
-required between stage 3 and stages 4-6 until a dedicated merge stage is added.
+  4. merge_skill_labels  trial_features.csv + metadata -> trial_features_with_skill.csv
+  5. analyze_features    trial_features_with_skill.csv -> QC/diagnostic reports
+  6. train_classical     trial_features_with_skill.csv -> trial-wise classical results
+  7. train_grouped       trial_features_with_skill.csv -> participant-wise classical results
+  8. train_rnn           cleaned trial CSVs         -> RNN results (both protocols)
 
 Any stage failure stops the pipeline immediately with a clear, actionable
 error message naming the failing stage, the command that was run, and the
@@ -56,6 +51,7 @@ ALL_STAGES = [
     "preprocess",
     "unified_pca",
     "extract_features",
+    "merge_skill_labels",
     "analyze_features",
     "train_classical",
     "train_grouped",
@@ -155,10 +151,19 @@ def stage_extract_features(config: dict, dry_run: bool) -> None:
     if not fe.get("normalize", True):
         command.append("--no_normalize")
     run_command(command, "extract_features", dry_run)
-    # NOTE: extract_features3.py outputs trial_features.csv WITHOUT skill labels.
-    # A merge step against paths["metadata_file"] is required to produce
-    # trial_features_with_skill.csv before running analyze_features/train_classical/
-    # train_grouped. This is not yet automated -- see README "Known issues".
+
+
+def stage_merge_skill_labels(config: dict, dry_run: bool) -> None:
+    paths = config["paths"]
+    trial_features = resolve_path(paths["features_dir"]) / "trial_features.csv"
+    output_file = resolve_path(paths["features_dir"]) / "trial_features_with_skill.csv"
+    command = [
+        sys.executable, str(SRC_DIR / "merge_skill_labels.py"),
+        "--trial_features", str(trial_features),
+        "--metadata_file", str(resolve_path(paths["metadata_file"])),
+        "--output_file", str(output_file),
+    ]
+    run_command(command, "merge_skill_labels", dry_run)
 
 
 def stage_analyze_features(config: dict, dry_run: bool) -> None:
@@ -243,6 +248,7 @@ STAGE_DISPATCH = {
     "preprocess": lambda cfg, dry: stage_preprocess(cfg, dry),
     "unified_pca": lambda cfg, dry: stage_unified_pca(cfg, dry),
     "extract_features": lambda cfg, dry: stage_extract_features(cfg, dry),
+    "merge_skill_labels": lambda cfg, dry: stage_merge_skill_labels(cfg, dry),
     "analyze_features": lambda cfg, dry: stage_analyze_features(cfg, dry),
     "train_classical": lambda cfg, dry: [
         stage_train_classical(cfg, dry, task, mode, feature_config)
