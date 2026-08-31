@@ -9,7 +9,7 @@ project:
   random_seed: 42
 
 paths:
-  raw_mocap_dir: "data/raw"                 # NOT committed to git (participant privacy)
+  raw_mocap_dir: "Z:/_forEugenie/segmented"               # NOT committed to git (participant privacy)
   preprocessed_dir: "data/preprocessed"      # NOT committed (derived from raw, regenerable, large)
   features_dir: "data/features_extracted"    # trial_features.csv -> committed (de-identified)
   pca_dir: "data/pca"                        # unified_pca_participant_features.csv -> committed
