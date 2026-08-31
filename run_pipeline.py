@@ -10,10 +10,16 @@ Stages (in order):
   1. preprocess          raw MoCap CSVs           -> cleaned trial CSVs
   2. unified_pca         cleaned trial CSVs        -> unified PCA participant features
   3. extract_features    cleaned + PCA features    -> trial_features.csv
-  4. analyze_features    trial_features.csv        -> QC/diagnostic reports
-  5. train_classical     trial_features.csv        -> trial-wise classical results
-  6. train_grouped       trial_features.csv        -> participant-wise classical results
+  4. analyze_features    trial_features_with_skill.csv -> QC/diagnostic reports
+  5. train_classical     trial_features_with_skill.csv -> trial-wise classical results
+  6. train_grouped       trial_features_with_skill.csv -> participant-wise classical results
   7. train_rnn           cleaned trial CSVs         -> RNN results (both protocols)
+
+NOTE: trial_features.csv (output of extract_features) does NOT contain skill
+labels. trial_features_with_skill.csv is trial_features.csv merged with the
+participant metadata file's skill-level column. This merge currently happens
+outside this orchestrator -- see README "Known issues" for the manual step
+required between stage 3 and stages 4-6 until a dedicated merge stage is added.
 
 Any stage failure stops the pipeline immediately with a clear, actionable
 error message naming the failing stage, the command that was run, and the
@@ -149,11 +155,15 @@ def stage_extract_features(config: dict, dry_run: bool) -> None:
     if not fe.get("normalize", True):
         command.append("--no_normalize")
     run_command(command, "extract_features", dry_run)
+    # NOTE: extract_features3.py outputs trial_features.csv WITHOUT skill labels.
+    # A merge step against paths["metadata_file"] is required to produce
+    # trial_features_with_skill.csv before running analyze_features/train_classical/
+    # train_grouped. This is not yet automated -- see README "Known issues".
 
 
 def stage_analyze_features(config: dict, dry_run: bool) -> None:
     paths = config["paths"]
-    trial_features = resolve_path(paths["features_dir"]) / "trial_features.csv"
+    trial_features = resolve_path(paths["features_dir"]) / "trial_features_with_skill.csv"
     command = [
         sys.executable, str(SRC_DIR / "analyze_features2.py"),
         "--trial_features", str(trial_features),
@@ -168,7 +178,7 @@ def stage_analyze_features(config: dict, dry_run: bool) -> None:
 def stage_train_classical(config: dict, dry_run: bool, task: str, instrument_mode: str, feature_config: str) -> None:
     paths = config["paths"]
     cv = config["cross_validation"]
-    trial_features = resolve_path(paths["features_dir"]) / "trial_features.csv"
+    trial_features = resolve_path(paths["features_dir"]) / "trial_features_with_skill.csv"
     output_dir = resolve_path(paths["training_results_dir"])
     command = [
         sys.executable, str(SRC_DIR / "train_skill_classifiers.py"),
@@ -186,7 +196,7 @@ def stage_train_classical(config: dict, dry_run: bool, task: str, instrument_mod
 def stage_train_grouped(config: dict, dry_run: bool, task: str, instrument_mode: str, feature_config: str) -> None:
     paths = config["paths"]
     cv = config["cross_validation"]
-    trial_features = resolve_path(paths["features_dir"]) / "trial_features.csv"
+    trial_features = resolve_path(paths["features_dir"]) / "trial_features_with_skill.csv"
     output_dir = resolve_path(paths["training_results_grouped_dir"])
     command = [
         sys.executable, str(SRC_DIR / "train_skill_classifiers_grouped.py"),
