@@ -1,0 +1,107 @@
+# =============================================================================
+# SAMuSe pipeline configuration
+# Single source of truth for paths, seeds, CV settings, and hyperparameters.
+# All scripts read defaults from here; CLI flags always override config values.
+# =============================================================================
+
+project:
+  name: "SAMuSe"
+  random_seed: 42
+
+paths:
+  raw_mocap_dir: "Z:/_forEugenie/segmented"               # NOT committed to git (participant privacy)
+  preprocessed_dir: "data_test/preprocessed"      # NOT committed (derived from raw, regenerable, large)
+  features_dir: "data_test/features_extracted"    # trial_features.csv -> committed (de-identified)
+  pca_dir: "data/pca"                        # unified_pca_participant_features.csv -> committed
+  analysis_dir: "data/features_analysis"     # QC reports -> NOT committed (regenerable, can be large)
+  metadata_file: "data/metadata/participants_instrument_skill_toshare.xlsx"  # committed (de-identified)
+  training_results_dir: "results/training_results"                 # trial-wise classical
+  training_results_grouped_dir: "results/training_results_grouped" # participant-wise classical
+  training_results_rnn_dir: "results/training_results_rnn"         # RNN
+  unified_pca_eval_dir: "results/unified_pca_evaluation"
+
+preprocessing:
+  sampling_rate_hz: 50.0
+  filter_order: 4
+  gap_limit_frames: 5
+  default_cutoff_hz: 6.0
+  # regex pattern -> cutoff Hz, first match wins
+  joint_group_cutoffs:
+    "(?i)wrist|hand|finger|thumb": 9.0
+    "(?i)toe": 8.0
+    "(?i)elbow|forearm": 8.0
+    "(?i)shoulder|clavicle|arm": 8.0
+    "(?i)hip|pelvis|thigh|knee|ankle|foot": 6.0
+    "(?i)frontal plane (knee|projection) angle|\\(deg\\)\\.1|\\(ratio\\)\\.1": 6.0
+    "(?i)spine|trunk|chest|neck|head|nose|ear|centerofgravity": 2.0
+
+feature_extraction:
+  conditions: "play,mime"
+  window_s: 2.0
+  window_step_s: 0.1
+  filter_order: 4
+  position_cutoff_hz: 10.0
+  sparc_cutoff_hz: 10.0
+  sparc_amp_threshold: 0.05
+  stroke_peak_min_distance_s: 0.10
+  normalize: true
+
+cross_validation:
+  n_splits: 5
+  random_state: 42          # must match project.random_seed
+
+classical_models:
+  high_correlation_threshold: 0.90
+  k_best: 0                 # 0 = keep all post-pruning features
+  random_forest:
+    trial_wise:
+      n_estimators: 500
+      max_depth: 8
+      min_samples_leaf: 5
+    participant_wise:
+      n_estimators: 500
+      max_depth: null        # unbounded, deliberately looser regularization for grouped CV
+      min_samples_leaf: 2
+  logreg:
+    max_iter: 5000
+    solver: "saga"
+  linear_svm:
+    kernel: "linear"
+
+rnn:
+  rnn_type: "gru"            # gru | lstm
+  hidden_dim: 64
+  num_layers: 2
+  dropout: 0.3
+  batch_size: 16
+  epochs: 60
+  patience: 8
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  device: "auto"              # auto | cpu | cuda | cuda:0 etc.
+  position_columns:
+    - "RWristPositions_X (mm)"
+    - "RWristPositions_Y (mm)"
+    - "RWristPositions_Z (mm)"
+    - "RElbowPositions_X (mm)"
+    - "RElbowPositions_Y (mm)"
+    - "RElbowPositions_Z (mm)"
+    - "RShoulderPositions_X (mm)"
+    - "RShoulderPositions_Y (mm)"
+    - "RShoulderPositions_Z (mm)"
+    - "LWristPositions_X (mm)"
+    - "LWristPositions_Y (mm)"
+    - "LWristPositions_Z (mm)"
+    - "LElbowPositions_X (mm)"
+    - "LElbowPositions_Y (mm)"
+    - "LElbowPositions_Z (mm)"
+    - "LShoulderPositions_X (mm)"
+    - "LShoulderPositions_Y (mm)"
+    - "LShoulderPositions_Z (mm)"
+
+unified_pca:
+  conditions: ["play"]
+  variance_targets: [0.90, 0.95]
+  n_pm_detail: 25
+  n_pm_to_show: 7
+  high_redundancy_threshold: 0.90

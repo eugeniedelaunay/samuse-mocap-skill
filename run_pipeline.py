@@ -7,7 +7,7 @@ Windows PowerShell, macOS, and Linux because it only shells out to
 `sys.executable -m` calls -- no OS-specific path syntax.
 
 Stages (in order):
-  1. preprocess          raw MoCap CSVs           -> cleaned trial CSVs
+  1. preprocess          raw MoCap CSVs (play + mime only) -> cleaned trial CSVs
   2. unified_pca         cleaned trial CSVs        -> unified PCA participant features
   3. extract_features    cleaned + PCA features    -> trial_features.csv
   4. merge_skill_labels  trial_features.csv + metadata -> trial_features_with_skill.csv
@@ -15,6 +15,13 @@ Stages (in order):
   6. train_classical     trial_features_with_skill.csv -> trial-wise classical results
   7. train_grouped       trial_features_with_skill.csv -> participant-wise classical results
   8. train_rnn           cleaned trial CSVs         -> RNN results (both protocols)
+
+The preprocess stage only processes files matching the "play" or "mime"
+conditions (raw filenames like P004_play_1.csv, P004_mime_3.csv), even if
+the raw data directory also contains other conditions (e.g. "imagine",
+"listen") that this pipeline does not use. It runs preprocess.py twice --
+once per condition pattern -- both writing into the same output directory,
+since preprocess.py's own --pattern flag only accepts a single glob.
 
 Any stage failure stops the pipeline immediately with a clear, actionable
 error message naming the failing stage, the command that was run, and the
@@ -57,6 +64,10 @@ ALL_STAGES = [
     "train_grouped",
     "train_rnn",
 ]
+
+# Only these MoCap conditions are preprocessed/used, even if raw data also
+# contains other conditions (e.g. "imagine", "listen") on disk.
+PREPROCESS_CONDITIONS = ["play", "mime"]
 
 
 def load_config(config_path: Path) -> dict:
@@ -113,13 +124,22 @@ def run_command(command: list, stage_name: str, dry_run: bool) -> None:
 def stage_preprocess(config: dict, dry_run: bool) -> None:
     paths = config["paths"]
     pre = config["preprocessing"]
-    command = [
-        sys.executable, str(SRC_DIR / "preprocess.py"),
-        "--input_dir", str(resolve_path(paths["raw_mocap_dir"])),
-        "--output_dir", str(resolve_path(paths["preprocessed_dir"])),
-        "--cutoff", str(pre["default_cutoff_hz"]),
-    ]
-    run_command(command, "preprocess", dry_run)
+    input_dir = str(resolve_path(paths["raw_mocap_dir"]))
+    output_dir = str(resolve_path(paths["preprocessed_dir"]))
+
+    # preprocess.py's --pattern only accepts a single glob, and this pipeline
+    # only wants "play" and "mime" conditions even though the raw directory
+    # may contain others (e.g. "imagine", "listen"). Run once per condition,
+    # all writing into the same output_dir.
+    for condition in PREPROCESS_CONDITIONS:
+        command = [
+            sys.executable, str(SRC_DIR / "preprocess.py"),
+            "--input_dir", input_dir,
+            "--output_dir", output_dir,
+            "--pattern", f"*_{condition}_*.csv",
+            "--cutoff", str(pre["default_cutoff_hz"]),
+        ]
+        run_command(command, f"preprocess[{condition}]", dry_run)
 
 
 def stage_unified_pca(config: dict, dry_run: bool) -> None:
