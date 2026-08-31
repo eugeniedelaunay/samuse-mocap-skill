@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 SAMuSe pre-training feature diagnostics.
 
@@ -13,12 +12,24 @@ It reports:
 - exploratory univariate association with skill;
 - feature redundancy (Pearson |r| >= threshold);
 - instrument-confound screening;
-- optional separate violin and clarinet reports.
+- optional separate violin and clarinet reports;
+- a compact top-N feature summary with redundancy and cross-instrument
+  agreement flags;
+- a plain-text copy of the console summary, saved alongside the CSVs.
 
 Safety defaults:
 - excludes metadata, trial duration, status/error, and every QC_* column;
 - excludes precomputed *_z columns by default, preventing raw/z duplicates;
-- never treats identifier columns as features.
+- never treats identifier columns as features;
+- when --metadata_file is supplied, only a fixed, known-safe set of
+  metadata columns is merged in (ID/participant_id, Instrument, Age, Sex).
+  "Num Level" is deliberately never merged or treated as a feature: it is
+  a numeric re-encoding of the skill label itself (novice=1,
+  advanced_beginner=2, competent=3, expert=4) and would leak the target
+  directly into the feature ranking. Any spreadsheet columns outside this
+  known set (e.g. stray summary/pivot-table columns living in the same
+  sheet, such as "Total", "Unnamed: 8", or bare integers) are never merged
+  in, regardless of what else is in the metadata file.
 
 Examples
 --------
@@ -59,11 +70,39 @@ NON_FEATURE_COLS = {
     "n_trials", "skill_level", "skill_group",
 }
 
+# Columns that are numeric re-encodings of the label itself, or otherwise
+# leak the target directly. Excluded even if a merge suffix (e.g. "_meta")
+# is appended to the name, and excluded from any metadata merge entirely
+# (never even joined in, not just filtered out afterward).
+LEAKAGE_COLUMN_BASENAMES = {
+    "num level", "numlevel", "skill level", "skilllevel",
+    "skill_level", "skill_group",
+}
+
+# The only metadata columns this script will ever merge in, besides the
+# participant ID column (which is detected dynamically and prepended
+# separately -- never hardcoded here, since its real name varies:
+# "ID", "participant_id", "Participant", etc.). Any other column present
+# in a metadata spreadsheet (stray summary/pivot-table columns, bare
+# integers, "Total", "Unnamed: N", "Skill Level", "Num Level", etc.) is
+# dropped before the merge happens, regardless of --metadata_file contents.
+SAFE_METADATA_COLUMNS = ["Instrument", "Age", "Sex"]
+
 NEAR_ZERO_VAR_THRESHOLD = 1e-8
 OUTLIER_IQR_MULTIPLIER = 1.5
 OUTLIER_Z_THRESHOLD = 3.0
 HIGH_CORR_THRESHOLD = 0.90
 MISSINGNESS_WARN_THRESHOLD = 0.30
+TOP_N_SUMMARY = 20
+CROSS_INSTRUMENT_RANK_THRESHOLD = 20
+
+
+def is_leakage_column(column_name):
+    normalized = str(column_name).strip().lower()
+    for suffix in ("_meta", "_baseline", "_pca_source", "_var", "_pm"):
+        if normalized.endswith(suffix):
+            normalized = normalized[: -len(suffix)]
+    return normalized in LEAKAGE_COLUMN_BASENAMES
 
 
 def load_table(path):
@@ -89,6 +128,7 @@ def load_and_merge(trial_features_path, metadata_file=None):
             raise FileNotFoundError(f"Metadata file does not exist: {metadata_file}")
         metadata = load_table(metadata_file)
         metadata.columns = [str(column).strip() for column in metadata.columns]
+
         id_column = next(
             (column for column in metadata.columns if column.strip().lower() in {"id", "participant_id", "participant"}),
             None,
@@ -98,6 +138,26 @@ def load_and_merge(trial_features_path, metadata_file=None):
                 "Could not identify participant ID column in metadata. "
                 f"Available columns: {list(metadata.columns)}"
             )
+
+        # Only merge a fixed, known-safe column set. This deliberately
+        # excludes "Num Level" (a numeric re-encoding of the skill label --
+        # would leak the target), "Skill Level" (already present via the
+        # trial_features_with_skill.csv merge upstream), and any stray
+        # non-data columns that may live in the same spreadsheet
+        # (summary/pivot-table remnants such as "Total", "Unnamed: N", or
+        # bare integer column headers).
+        available_safe_columns = [id_column] + [
+            column for column in SAFE_METADATA_COLUMNS if column in metadata.columns
+        ]
+        dropped_columns = [column for column in metadata.columns if column not in available_safe_columns]
+        if dropped_columns:
+            print(
+                f"Metadata merge: keeping only {available_safe_columns}; "
+                f"excluding {len(dropped_columns)} other column(s) not in the safe list "
+                f"(includes any leakage-risk or stray spreadsheet columns): {dropped_columns}"
+            )
+        metadata = metadata[available_safe_columns].copy()
+
         metadata = metadata.rename(columns={id_column: "participant_id"})
         metadata["participant_id"] = normalize_participant_id(metadata["participant_id"])
         dataframe["participant_id"] = normalize_participant_id(dataframe["participant_id"])
@@ -131,6 +191,8 @@ def get_feature_columns(dataframe, feature_set="raw_only"):
     columns = []
     for column in dataframe.columns:
         if column in NON_FEATURE_COLS:
+            continue
+        if is_leakage_column(column):
             continue
         if str(column).startswith("QC_"):
             continue
@@ -353,7 +415,29 @@ def analyze_instrument_confound(dataframe, feature_columns, instrument_column="i
     return result
 
 
-def build_final_ranking(missingness, distributions, outliers, discrimination, confounds):
+def flag_redundant_with_better_feature(ranking, correlations, threshold=HIGH_CORR_THRESHOLD):
+    """For each feature (in rank order, best first), flag it as redundant if
+    a strictly better-ranked feature already correlates with it above
+    threshold. The better-ranked feature in each pair is never flagged."""
+    ranked_features = ranking.sort_values("composite_score", ascending=False)["feature"].tolist()
+    kept = []
+    redundant_flags = {}
+    for feature in ranked_features:
+        is_redundant = False
+        if feature in correlations.columns:
+            for better_feature in kept:
+                if better_feature in correlations.columns:
+                    value = correlations.loc[feature, better_feature]
+                    if np.isfinite(value) and abs(value) >= threshold:
+                        is_redundant = True
+                        break
+        redundant_flags[feature] = is_redundant
+        if not is_redundant:
+            kept.append(feature)
+    return redundant_flags
+
+
+def build_final_ranking(missingness, distributions, outliers, discrimination, confounds, correlations=None):
     ranking = distributions[["feature", "n_valid", "variance", "flag_near_zero_variance"]].copy()
     ranking = ranking.merge(
         missingness[["feature", "pct_missing", "flag_high_missing"]], on="feature", how="left"
@@ -400,9 +484,49 @@ def build_final_ranking(missingness, distributions, outliers, discrimination, co
         return value
 
     ranking["composite_score"] = ranking.apply(score, axis=1)
+
+    if correlations is not None:
+        redundant_flags = flag_redundant_with_better_feature(ranking, correlations)
+        ranking["flag_redundant_with_better_feature"] = ranking["feature"].map(redundant_flags).fillna(False)
+    else:
+        ranking["flag_redundant_with_better_feature"] = False
+
     ranking = ranking.sort_values("composite_score", ascending=False).reset_index(drop=True)
     ranking["rank"] = np.arange(1, len(ranking) + 1)
     return ranking
+
+
+def write_top_n_summary(ranking, output_dir, prefix, top_n=TOP_N_SUMMARY):
+    columns = [
+        column for column in [
+            "rank", "feature", "composite_score", "mutual_info", "anova_p",
+            "flag_redundant_with_better_feature", "flag_near_zero_variance",
+            "flag_high_missing", "differs_significantly_by_instrument",
+        ]
+        if column in ranking.columns
+    ]
+    top = ranking.head(top_n)[columns].copy()
+    top.to_csv(os.path.join(output_dir, f"{prefix}top_{top_n}_features.csv"), index=False)
+    return top
+
+
+def build_cross_instrument_agreement(violin_ranking, clarinet_ranking, threshold=CROSS_INSTRUMENT_RANK_THRESHOLD):
+    merged = violin_ranking[["feature", "rank", "composite_score"]].rename(
+        columns={"rank": "violin_rank", "composite_score": "violin_composite_score"}
+    ).merge(
+        clarinet_ranking[["feature", "rank", "composite_score"]].rename(
+            columns={"rank": "clarinet_rank", "composite_score": "clarinet_composite_score"}
+        ),
+        on="feature",
+        how="outer",
+    )
+    merged["flag_consistent_across_instruments"] = (
+        (merged["violin_rank"] <= threshold) & (merged["clarinet_rank"] <= threshold)
+    )
+    merged = merged.sort_values(
+        ["flag_consistent_across_instruments", "violin_rank"], ascending=[False, True]
+    )
+    return merged
 
 
 def write_reports(dataframe, feature_columns, target_column, output_dir, prefix=""):
@@ -413,17 +537,18 @@ def write_reports(dataframe, feature_columns, target_column, output_dir, prefix=
     discrimination = analyze_discriminative_power(dataframe, feature_columns, target_column)
     correlations, redundant_pairs = analyze_multicollinearity(dataframe, feature_columns)
     confounds = analyze_instrument_confound(dataframe, feature_columns)
-    ranking = build_final_ranking(missingness, distributions, outlier_summary, discrimination, confounds)
+    ranking = build_final_ranking(missingness, distributions, outlier_summary, discrimination, confounds, correlations)
 
     missingness.to_csv(os.path.join(output_dir, f"{prefix}missingness.csv"), index=False)
     distributions.to_csv(os.path.join(output_dir, f"{prefix}distributions.csv"), index=False)
     outlier_summary.to_csv(os.path.join(output_dir, f"{prefix}outlier_summary.csv"), index=False)
     outlier_details.to_csv(os.path.join(output_dir, f"{prefix}outlier_details.csv"), index=False)
     discrimination.to_csv(os.path.join(output_dir, f"{prefix}discriminative_power.csv"), index=False)
-    correlations.to_csv(os.path.join(output_dir, f"{prefix}feature_correlations.csv") )
+    correlations.to_csv(os.path.join(output_dir, f"{prefix}feature_correlations.csv"))
     redundant_pairs.to_csv(os.path.join(output_dir, f"{prefix}redundant_feature_pairs.csv"), index=False)
     confounds.to_csv(os.path.join(output_dir, f"{prefix}instrument_confound.csv"), index=False)
     ranking.to_csv(os.path.join(output_dir, f"{prefix}feature_ranking.csv"), index=False)
+    write_top_n_summary(ranking, output_dir, prefix)
 
     return {
         "missingness": missingness,
@@ -436,26 +561,41 @@ def write_reports(dataframe, feature_columns, target_column, output_dir, prefix=
     }
 
 
-def print_summary(reports, title):
+def build_summary_text(reports, title):
+    lines = []
     ranking = reports["ranking"]
-    print("\n" + "=" * 70)
-    print(title)
-    print("=" * 70)
-    print(f"Total features analyzed: {len(ranking)}")
-    print(f"Features with >30% missing: {int(reports['missingness']['flag_high_missing'].sum())}")
-    print(f"Near-zero-variance features: {int(reports['distributions']['flag_near_zero_variance'].sum())}")
-    print(f"Redundant |r| >= {HIGH_CORR_THRESHOLD:.2f} pairs: {len(reports['redundancy'])}")
+    lines.append("\n" + "=" * 70)
+    lines.append(title)
+    lines.append("=" * 70)
+    lines.append(f"Total features analyzed: {len(ranking)}")
+    lines.append(f"Features with >30% missing: {int(reports['missingness']['flag_high_missing'].sum())}")
+    lines.append(f"Near-zero-variance features: {int(reports['distributions']['flag_near_zero_variance'].sum())}")
+    lines.append(f"Redundant |r| >= {HIGH_CORR_THRESHOLD:.2f} pairs: {len(reports['redundancy'])}")
+    if "flag_redundant_with_better_feature" in ranking.columns:
+        lines.append(
+            f"Features flagged redundant with a better-ranked feature: "
+            f"{int(ranking['flag_redundant_with_better_feature'].sum())}"
+        )
     if not reports["confounds"].empty:
-        print(f"Features differing by instrument (p<.05): {int(reports['confounds']['differs_significantly_by_instrument'].sum())}")
+        lines.append(f"Features differing by instrument (p<.05): {int(reports['confounds']['differs_significantly_by_instrument'].sum())}")
 
-    print("\nTop 10 exploratory features:")
-    columns = [column for column in ["rank", "feature", "composite_score", "mutual_info", "anova_p"] if column in ranking.columns]
-    print(ranking.head(10)[columns].to_string(index=False))
-    print("\nBottom 10 candidates to inspect/drop:")
+    lines.append(f"\nTop {TOP_N_SUMMARY} exploratory features:")
+    columns = [column for column in ["rank", "feature", "composite_score", "mutual_info", "anova_p", "flag_redundant_with_better_feature"] if column in ranking.columns]
+    lines.append(ranking.head(TOP_N_SUMMARY)[columns].to_string(index=False))
+    lines.append("\nBottom 10 candidates to inspect/drop:")
     columns = [column for column in ["rank", "feature", "composite_score", "mutual_info", "flag_near_zero_variance", "flag_high_missing"] if column in ranking.columns]
-    print(ranking.tail(10)[columns].to_string(index=False))
-    print("\nReminder: these univariate trial-row statistics are exploratory only. "
-          "Decide final features inside participant-grouped nested CV.")
+    lines.append(ranking.tail(10)[columns].to_string(index=False))
+    lines.append(
+        "\nReminder: these univariate trial-row statistics are exploratory only. "
+        "Decide final features inside participant-grouped nested CV."
+    )
+    return "\n".join(lines)
+
+
+def print_summary(reports, title):
+    text = build_summary_text(reports, title)
+    print(text)
+    return text
 
 
 def main():
@@ -481,7 +621,7 @@ def main():
         raise ValueError(f"No numeric feature columns found for feature_set={args.feature_set}.")
 
     print(f"Loaded {len(dataframe)} successful trial rows, {len(feature_columns)} numeric features ({args.feature_set}).")
-    print("QC_* columns, metadata, duration, and raw/z duplicates are excluded according to --feature_set.")
+    print("QC_* columns, metadata, duration, raw/z duplicates, and leakage-risk columns (e.g. Num Level) are excluded.")
     print("\n[1/7] Analyzing missingness...")
     print("[2/7] Analyzing distributions...")
     print("[3/7] Detecting outliers...")
@@ -490,14 +630,17 @@ def main():
     print("[6/7] Checking instrument confound...")
     print("[7/7] Building final composite ranking...")
 
+    all_summary_text = []
+
     overall_reports = write_reports(dataframe, feature_columns, target_column, args.output_dir, prefix="overall_")
-    print_summary(overall_reports, "OVERALL FEATURE-DIAGNOSTIC SUMMARY")
+    all_summary_text.append(print_summary(overall_reports, "OVERALL FEATURE-DIAGNOSTIC SUMMARY"))
 
     if args.per_instrument:
         if "instrument" not in dataframe.columns:
             print("\nPer-instrument analysis skipped: no instrument column available.")
         else:
             side_by_side = []
+            per_instrument_reports = {}
             for instrument in ("violin", "clarinet"):
                 subset = dataframe[dataframe["instrument"].astype(str).str.lower() == instrument].copy()
                 if subset.empty:
@@ -510,7 +653,8 @@ def main():
                     args.output_dir,
                     prefix=f"{instrument}_",
                 )
-                print_summary(reports, f"{instrument.upper()} FEATURE-DIAGNOSTIC SUMMARY")
+                per_instrument_reports[instrument] = reports
+                all_summary_text.append(print_summary(reports, f"{instrument.upper()} FEATURE-DIAGNOSTIC SUMMARY"))
                 ranking = reports["ranking"][["feature", "rank", "composite_score", "mutual_info", "anova_p"]].copy()
                 ranking = ranking.rename(columns={
                     "rank": f"{instrument}_rank",
@@ -525,7 +669,25 @@ def main():
                     comparison = comparison.merge(table, on="feature", how="outer")
                 comparison.to_csv(os.path.join(args.output_dir, "per_instrument_feature_comparison.csv"), index=False)
 
+            if "violin" in per_instrument_reports and "clarinet" in per_instrument_reports:
+                agreement = build_cross_instrument_agreement(
+                    per_instrument_reports["violin"]["ranking"],
+                    per_instrument_reports["clarinet"]["ranking"],
+                )
+                agreement.to_csv(os.path.join(args.output_dir, "cross_instrument_agreement.csv"), index=False)
+                n_consistent = int(agreement["flag_consistent_across_instruments"].sum())
+                consistency_line = (
+                    f"\nFeatures ranked in the top {CROSS_INSTRUMENT_RANK_THRESHOLD} for BOTH violin and clarinet "
+                    f"(strongest, most generalizable candidates): {n_consistent}"
+                )
+                print(consistency_line)
+                all_summary_text.append(consistency_line)
+
+    with open(os.path.join(args.output_dir, "summary.txt"), "w", encoding="utf-8") as file:
+        file.write("\n".join(all_summary_text))
+
     print(f"\nAll reports saved to: {args.output_dir}")
+    print(f"Console summary also saved to: {os.path.join(args.output_dir, 'summary.txt')}")
 
 
 if __name__ == "__main__":
