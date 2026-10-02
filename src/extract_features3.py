@@ -27,7 +27,8 @@ python extract_features3.py \
   --input_dir preprocessed/ \
   --output_dir features/ \
   --metadata_file metadata/participants_instrument_skill_toshare.xlsx \
-  --pca_features_csv features_weiss/unified_pca_play_mime/unified_pca_participant_features.csv
+  --pca_features_csv features_weiss/unified_pca_play_mime/12a_shared_pm_usage_by_block.csv \\
+  features_weiss/unified_pca_play_mime/16_joint_angle_variability_family_by_block.csv
 """
 
 import argparse
@@ -91,7 +92,6 @@ SHARED_PCA_FEATURES = [
 ]
 INSTRUMENT_SPECIFIC_PCA_FEATURES = {
     "clarinet": [
-        "PCA11b_within_participant_consistency",
         "PCA12a_PM4_rms",
     ],
     "violin": ["PCA12a_PM6_rms"],
@@ -458,15 +458,15 @@ def standardize_merge_keys(dataframe, keys, source_name):
 
 
 def merge_selected_pca_features(features, pca_features_csv, output_dir, include_instrument_specific=False):
+    """Merge block-level PCA features on participant, condition and block.
+
+    Every PCA file must contain a block column. A participant/condition-level
+    merge would give identical values to all blocks of a participant, so
+    the feature could identify the participant under trial-wise folds.
+    """
     if not pca_features_csv:
         return features
-    if not os.path.exists(pca_features_csv):
-        raise FileNotFoundError(f"PCA feature file does not exist: {pca_features_csv}")
-
-    left = standardize_merge_keys(features, PCA_MERGE_KEYS, "Extracted features")
-    right = pd.read_csv(pca_features_csv)
-    source_keys = PCA_MERGE_KEYS if "block" in right.columns else ["participant_id", "condition"]
-    right = standardize_merge_keys(right, source_keys, "PCA feature file")
+    paths = [pca_features_csv] if isinstance(pca_features_csv, str) else list(pca_features_csv)
 
     selected = list(SHARED_PCA_FEATURES)
     if include_instrument_specific:
@@ -474,50 +474,60 @@ def merge_selected_pca_features(features, pca_features_csv, output_dir, include_
             feature for feature_list in INSTRUMENT_SPECIFIC_PCA_FEATURES.values()
             for feature in feature_list
         )
-    missing_features = [feature for feature in selected if feature not in right.columns]
-    if missing_features:
-        raise ValueError(f"PCA feature file is missing selected columns: {missing_features}")
-    if right.duplicated(source_keys).any():
-        duplicates = right.loc[right.duplicated(source_keys, keep=False), source_keys].head(10)
-        raise ValueError(
-            "PCA feature file has duplicate merge keys; merge is ambiguous:\n"
-            f"{duplicates.to_string(index=False)}"
-        )
 
-    overlap = [feature for feature in selected if feature in left.columns]
+    merged = standardize_merge_keys(features, PCA_MERGE_KEYS, "Extracted features")
+    overlap = [feature for feature in selected if feature in merged.columns]
     if overlap:
         raise ValueError(f"PCA feature columns already exist in the extracted table: {overlap}")
 
-    source_columns = source_keys + selected
-    if include_instrument_specific and "instrument" in right.columns:
-        source_columns.append("instrument")
-    right = right[source_columns]
+    found = []
+    for path in paths:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"PCA feature file does not exist: {path}")
+        right = pd.read_csv(path)
+        if "block" not in right.columns:
+            raise ValueError(
+                f"{path} has no 'block' column. Merging on participant/condition only would "
+                "assign identical PCA values to all blocks of a participant (participant-identity leak)."
+            )
+        right = standardize_merge_keys(right, PCA_MERGE_KEYS, os.path.basename(path))
+        columns = [feature for feature in selected if feature in right.columns and feature not in found]
+        if not columns:
+            print(f"PCA file {os.path.basename(path)}: no requested features; skipped.")
+            continue
+        if right.duplicated(PCA_MERGE_KEYS).any():
+            duplicates = right.loc[right.duplicated(PCA_MERGE_KEYS, keep=False), PCA_MERGE_KEYS].head(10)
+            raise ValueError(
+                f"{path} has duplicate merge keys; merge is ambiguous:\n{duplicates.to_string(index=False)}"
+            )
+        merged = merged.merge(
+            right[PCA_MERGE_KEYS + columns],
+            on=PCA_MERGE_KEYS,
+            how="left",
+            validate="many_to_one",
+            indicator="_pca_merge",
+        )
+        matched = int((merged["_pca_merge"] == "both").sum())
+        print(f"PCA merge ({os.path.basename(path)}): matched {matched}/{len(merged)} rows; added {len(columns)} feature(s).")
+        unmatched = merged.loc[merged["_pca_merge"] != "both", PCA_MERGE_KEYS]
+        if not unmatched.empty:
+            out = os.path.join(output_dir, f"unmatched_pca_rows_{Path(path).stem}.csv")
+            unmatched.to_csv(out, index=False)
+            print(f"Warning: saved {len(unmatched)} unmatched PCA rows to: {out}")
+        merged = merged.drop(columns="_pca_merge")
+        found.extend(columns)
 
-    merged = left.merge(
-        right,
-        on=source_keys,
-        how="left",
-        validate="many_to_one",
-        indicator="_pca_merge",
-        suffixes=("", "_pca_source"),
-    )
-    matched = int((merged["_pca_merge"] == "both").sum())
-    print(f"PCA merge: matched {matched}/{len(merged)} rows; added {len(selected)} PCA feature(s).")
-
-    unmatched = merged.loc[merged["_pca_merge"] != "both"].drop(columns="_pca_merge")
-    if not unmatched.empty:
-        path = os.path.join(output_dir, "unmatched_shared_pca_rows.csv")
-        unmatched.to_csv(path, index=False)
-        print(f"Warning: saved {len(unmatched)} unmatched PCA rows to: {path}")
+    missing = [feature for feature in selected if feature not in found]
+    if missing:
+        raise ValueError(f"Requested PCA features not found in any PCA file: {missing}")
 
     if include_instrument_specific:
-        merged["instrument"] = merged["instrument"].astype(str).str.strip().str.lower()
-        for instrument, instrument_features in INSTRUMENT_SPECIFIC_PCA_FEATURES.items():
+        instrument = merged["instrument"].astype(str).str.strip().str.lower()
+        for name, instrument_features in INSTRUMENT_SPECIFIC_PCA_FEATURES.items():
             for feature in instrument_features:
-                merged.loc[merged["instrument"] != instrument, feature] = np.nan
-        merged = merged.drop(columns="instrument_pca_source", errors="ignore")
+                merged.loc[instrument != name, feature] = np.nan
 
-    return merged.drop(columns="_pca_merge")
+    return merged
 
 
 def filter_files_by_condition(files, instrument_map, keep_conditions):
@@ -625,7 +635,7 @@ def main():
     parser.add_argument("--metadata_file", default=None, help="Participant metadata CSV/XLSX")
     parser.add_argument("--pattern", default="*_clean.csv", help="Recursive batch file pattern")
     parser.add_argument("--conditions", default="play,mime", help="Comma-separated conditions; use all for no filter")
-    parser.add_argument("--pca_features_csv", default=None, help="Unified PCA participant/block feature CSV")
+    parser.add_argument("--pca_features_csv", nargs="+", default=None, help="One or more block-level PCA feature CSVs (must contain participant_id, condition, block)")
     parser.add_argument(
         "--include_instrument_specific_pca",
         action="store_true",

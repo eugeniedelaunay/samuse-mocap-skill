@@ -10,7 +10,7 @@ metric is balanced accuracy.
 
 Example:
 python src/train_skill_classifiers_grouped.py \
-  --trial_features features_extracted/trial_features_with_skill.csv \
+  --trial_features features_extracted_new/trial_features_with_skill.csv \
   --output_dir training_results_grouped/pooled_3class_shared_pca \
   --task 3class \
   --instrument_mode pooled \
@@ -166,7 +166,10 @@ def candidate_feature_columns(dataframe, config, instrument_mode):
             continue
         columns.append(column)
 
-    baseline = [column for column in columns if column.startswith(("ROM_", "LDJ_stroke_"))]
+    def belongs_to_baseline(column):
+        return column.startswith(("ROM_", "LDJ_stroke_")) and not column.startswith("ROM_rate_")
+
+    baseline = [column for column in columns if belongs_to_baseline(column)]
     shared = [column for column in columns if column in SHARED_PCA_FEATURES]
 
     if config == "baseline":
@@ -430,6 +433,25 @@ def run_experiment(dataframe, feature_columns, class_order, model_name, n_splits
     return summary
 
 
+def drop_instrument_missing_features(dataframe, feature_columns, min_valid=2):
+    """Drop features that are (almost) entirely missing for any instrument.
+
+    In pooled models such columns are median-imputed with a constant for that
+    instrument, so the imputed constant reveals the instrument.
+    """
+    kept, dropped = [], []
+    for column in feature_columns:
+        values = pd.to_numeric(dataframe[column], errors="coerce")
+        valid = values.notna().groupby(dataframe["instrument"]).sum()
+        if (valid < min_valid).any():
+            dropped.append(column)
+        else:
+            kept.append(column)
+    if dropped:
+        print(f"Pooled mode: dropped instrument-missing features (would encode instrument): {dropped}")
+    return kept
+
+
 def run_mode(dataframe, class_order, feature_columns, instrument_mode, config, models, n_splits, k_best, output_dir):
     summaries = []
     if instrument_mode == "pooled":
@@ -437,6 +459,7 @@ def run_mode(dataframe, class_order, feature_columns, instrument_mode, config, m
             print("Pooled instrument-specific configuration requested: using shared_pca features to avoid missingness-based instrument leakage.")
             config = "shared_pca"
             feature_columns = candidate_feature_columns(dataframe, config, "pooled")
+        feature_columns = drop_instrument_missing_features(dataframe, feature_columns)
         run_name = f"pooled_{config}_grouped"
         for model_name in models:
             summaries.append(run_experiment(

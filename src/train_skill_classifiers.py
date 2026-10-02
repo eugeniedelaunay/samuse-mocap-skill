@@ -1,4 +1,11 @@
 """
+NOTE (corrections):
+- ROM_rate_* (ROM divided by trial duration) is excluded from the baseline set.
+- In pooled mode, any feature with fewer than 2 valid values for any
+  instrument (e.g. left-wrist stroke LDJ, PM4, PM6, windowed SPARC) is
+  dropped, so that imputation cannot reveal the instrument.
+- Logistic regression C = 0.5, linear SVM C = 0.1 (LOGREG_C, SVM_C).
+
 SAMuSe trial-wise skill-classification experiments.
 
 Teacher-specified evaluation protocol
@@ -77,6 +84,8 @@ from sklearn.feature_selection import VarianceThreshold
 RANDOM_STATE = 42
 DEFAULT_SPLITS = 5
 HIGH_CORRELATION = 0.90
+LOGREG_C = float(os.environ.get("SAMUSE_LOGREG_C", 0.5))
+SVM_C = float(os.environ.get("SAMUSE_SVM_C", 0.1))
 
 DROP_EXACT = {
     "participant_id", "condition", "block", "instrument", "file", "status", "error",
@@ -186,7 +195,7 @@ def candidate_feature_columns(dataframe, config, instrument_mode):
         columns.append(column)
 
     def belongs_to_baseline(column):
-        return column.startswith(("ROM_", "LDJ_stroke_"))
+        return column.startswith(("ROM_", "LDJ_stroke_")) and not column.startswith("ROM_rate_")
 
     baseline = [column for column in columns if belongs_to_baseline(column)]
     shared = [column for column in columns if column in SHARED_PCA_FEATURES]
@@ -246,7 +255,7 @@ def make_classifier(model_name):
     if model_name == "logreg":
         return LogisticRegression(
             max_iter=5000,
-	    C=0.5,
+	    C=LOGREG_C,
             class_weight="balanced",
             solver="saga",
             random_state=RANDOM_STATE,
@@ -254,7 +263,7 @@ def make_classifier(model_name):
     if model_name == "linear_svm":
         return SVC(
             kernel="linear",
-	    C=0.1,
+	    C=SVM_C,
             class_weight="balanced",
             random_state=RANDOM_STATE,
         )
@@ -423,9 +432,30 @@ def run_experiment(dataframe, feature_columns, class_order, model_name, n_splits
             "k_best": k_best,
             "correlation_threshold": HIGH_CORRELATION,
             "random_state": RANDOM_STATE,
+            "logreg_C": LOGREG_C,
+            "svm_C": SVM_C,
         }, file, indent=2)
 
     return summary
+
+
+def drop_instrument_missing_features(dataframe, feature_columns, min_valid=2):
+    """Drop features that are (almost) entirely missing for any instrument.
+
+    In pooled models such columns are median-imputed with a constant for that
+    instrument, so the imputed constant reveals the instrument.
+    """
+    kept, dropped = [], []
+    for column in feature_columns:
+        values = pd.to_numeric(dataframe[column], errors="coerce")
+        valid = values.notna().groupby(dataframe["instrument"]).sum()
+        if (valid < min_valid).any():
+            dropped.append(column)
+        else:
+            kept.append(column)
+    if dropped:
+        print(f"Pooled mode: dropped instrument-missing features (would encode instrument): {dropped}")
+    return kept
 
 
 def run_mode(dataframe, class_order, feature_columns, instrument_mode, config, models, n_splits, k_best, output_dir):
@@ -437,6 +467,7 @@ def run_mode(dataframe, class_order, feature_columns, instrument_mode, config, m
             print("Pooled + instrument_specific requested: using shared_pca feature set to avoid instrument-missingness leakage.")
             config = "shared_pca"
             feature_columns = candidate_feature_columns(dataframe, config, "pooled")
+        feature_columns = drop_instrument_missing_features(dataframe, feature_columns)
         run_name = f"pooled_{config}"
         for model_name in models:
             summaries.append(run_experiment(
